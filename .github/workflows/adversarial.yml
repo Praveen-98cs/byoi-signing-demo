@@ -1,0 +1,34 @@
+name: adversarial-sign
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "rogue-key (sign with an untrusted key) | trusted-key-feature (trusted key, honest branch=feature-x provenance)"
+        required: true
+        default: rogue-key
+      image:
+        description: "image reference to sign (tag or digest)"
+        required: true
+permissions:
+  contents: read
+  packages: write
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sign
+        env:
+          MODE: ${{ inputs.mode }}
+          IMG: ${{ inputs.image }}
+          ROGUE_KEY: ${{ secrets.ROGUE_PRIVATE_KEY }}
+          ROGUE_PW: ${{ secrets.ROGUE_PASSWORD }}
+          TRUSTED_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          TRUSTED_PW: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          curl -sSfL https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-amd64 -o /usr/local/bin/cosign && chmod +x /usr/local/bin/cosign
+          echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u "${{ github.actor }}" --password-stdin
+          if [ "$MODE" = rogue-key ]; then export COSIGN_PRIVATE_KEY="$ROGUE_KEY" COSIGN_PASSWORD="$ROGUE_PW"; else export COSIGN_PRIVATE_KEY="$TRUSTED_KEY" COSIGN_PASSWORD="$TRUSTED_PW"; fi
+          echo '{"branch":"feature-x","ref":"refs/heads/feature-x","commit":"5bfbb4533422b77cb0cc2f0f801f7d15ea402a1c","builder":"adversarial-'"$MODE"'"}' > predicate.json
+          cosign sign --yes --key env://COSIGN_PRIVATE_KEY --use-signing-config=false --tlog-upload=false "$IMG"
+          cosign attest --yes --key env://COSIGN_PRIVATE_KEY --use-signing-config=false --tlog-upload=false --type https://choreo.dev/provenance/v1 --predicate predicate.json "$IMG"
+          echo "Signed ($MODE) $IMG"
