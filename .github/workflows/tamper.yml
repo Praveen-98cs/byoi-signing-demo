@@ -1,0 +1,18 @@
+name: tamper-main-tag
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
+jobs:
+  tamper:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Overwrite :main with an unsigned image
+        run: |
+          IMAGE=ghcr.io/$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker build --build-arg BRANCH=TAMPERED --build-arg COMMIT=none -t "$IMAGE:main" .
+          docker push "$IMAGE:main"
+          echo "Overwrote $IMAGE:main with an unsigned image"

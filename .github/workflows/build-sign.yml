@@ -1,0 +1,49 @@
+name: build-sign
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
+env:
+  COSIGN_VERSION: v3.1.3
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and push
+        id: push
+        run: |
+          IMAGE=ghcr.io/$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
+          BRANCH="${GITHUB_REF_NAME}"
+          TAG=$(echo "$BRANCH" | tr -c 'a-zA-Z0-9_.-' '-' | sed 's/-*$//')
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker build --build-arg BRANCH="$BRANCH" --build-arg COMMIT="$GITHUB_SHA" -t "$IMAGE:$GITHUB_SHA" -t "$IMAGE:$TAG" .
+          docker push "$IMAGE:$GITHUB_SHA"
+          docker push "$IMAGE:$TAG"
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE:$GITHUB_SHA" | cut -d@ -f2)
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Pushed $IMAGE:$GITHUB_SHA and :$TAG ($DIGEST) from branch $BRANCH"
+      - name: Sign and attest (main only)
+        if: github.ref == 'refs/heads/main'
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          REF: ${{ steps.push.outputs.image }}@${{ steps.push.outputs.digest }}
+        run: |
+          curl -sSfL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" -o /usr/local/bin/cosign && chmod +x /usr/local/bin/cosign
+          echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u "${{ github.actor }}" --password-stdin
+          cat > predicate.json <<JSON
+          {"branch": "${GITHUB_REF_NAME}", "ref": "${GITHUB_REF}", "commit": "${GITHUB_SHA}",
+           "repository": "${GITHUB_REPOSITORY}", "workflow": "${GITHUB_WORKFLOW}", "runId": "${GITHUB_RUN_ID}",
+           "builder": "github-actions"}
+          JSON
+          cosign sign --yes --key env://COSIGN_PRIVATE_KEY --use-signing-config=false --tlog-upload=false "$REF"
+          cosign attest --yes --key env://COSIGN_PRIVATE_KEY --use-signing-config=false --tlog-upload=false \
+            --type https://choreo.dev/provenance/v1 --predicate predicate.json "$REF"
+          echo "Signed and attested $REF"
+      - name: Skip signing (not main)
+        if: github.ref != 'refs/heads/main'
+        run: echo "Branch ${GITHUB_REF_NAME} is not main - image pushed but NOT signed"
