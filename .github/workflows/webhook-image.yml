@@ -1,0 +1,23 @@
+name: webhook-image
+on:
+  push:
+    branches: [main]
+    paths: ["webhook/**", ".github/workflows/webhook-image.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build and push signature-webhook (linux/amd64 + linux/arm64)
+        run: |
+          IMAGE=ghcr.io/$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')/choreo-signature-webhook
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker buildx build --platform linux/amd64,linux/arm64 \
+            --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
+            -t "$IMAGE:${GITHUB_SHA}" -t "$IMAGE:latest" --push webhook
+          echo "Pushed $IMAGE:${GITHUB_SHA}"
