@@ -53,6 +53,7 @@ type webhook struct {
 	trustedPrefixes []string
 	sigRepo         string // optional: where signatures live, like COSIGN_REPOSITORY
 	cacheTTL        time.Duration
+	budget          time.Duration
 
 	mu    sync.Mutex
 	cache map[string]verdict // key: repo@sha256 digest
@@ -67,6 +68,7 @@ func main() {
 	trusted := flag.String("trusted-prefixes", "", "comma-separated image prefixes that are always allowed (platform images)")
 	sigRepo := flag.String("signature-repo", "", "optional repository that holds signatures (like COSIGN_REPOSITORY)")
 	ttl := flag.Duration("cache-ttl", 10*time.Minute, "how long a per-digest result is cached")
+	budget := flag.Duration("verify-timeout", 15*time.Second, "time budget per admission request; keep it BELOW the webhook's timeoutSeconds so we answer before the API server gives up")
 	flag.Parse()
 
 	pemBytes, err := os.ReadFile(*pubKey)
@@ -76,7 +78,7 @@ func main() {
 	verifier, err := signature.LoadVerifier(pub, crypto.SHA256)
 	must(err, "load verifier")
 
-	wh := &webhook{verifier: verifier, allowedBranch: *allowed, sigRepo: *sigRepo, cacheTTL: *ttl, cache: map[string]verdict{}}
+	wh := &webhook{verifier: verifier, allowedBranch: *allowed, sigRepo: *sigRepo, cacheTTL: *ttl, budget: *budget, cache: map[string]verdict{}}
 	for _, p := range strings.Split(*trusted, ",") {
 		if p = strings.TrimSpace(p); p != "" {
 			wh.trustedPrefixes = append(wh.trustedPrefixes, p)
@@ -112,7 +114,7 @@ func (wh *webhook) serveValidate(w http.ResponseWriter, r *http.Request) {
 		resp.Allowed = false
 		resp.Result = &metav1.Status{Code: http.StatusBadRequest, Message: "signature-webhook: cannot read workload: " + err.Error()}
 	} else {
-		ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), wh.budget)
 		defer cancel()
 		var problems []string
 		for _, img := range images {
@@ -152,10 +154,12 @@ func (wh *webhook) trusted(img string) bool {
 func (wh *webhook) check(ctx context.Context, img string) (bool, string) {
 	ref, err := name.ParseReference(img)
 	if err != nil {
+		log.Printf("   %s ok=false invalid image reference", img)
 		return false, "invalid image reference"
 	}
 	desc, err := remote.Head(ref, remote.WithAuthFromKeychain(authn.DefaultKeychain), remote.WithContext(ctx))
 	if err != nil {
+		log.Printf("   %s ok=false cannot resolve digest: %s", img, oneLine(err))
 		return false, "cannot resolve digest: " + oneLine(err)
 	}
 	pinned := ref.Context().Digest(desc.Digest.String())
